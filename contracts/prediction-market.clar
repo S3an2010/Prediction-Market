@@ -41,13 +41,17 @@
   (let (
     (market-id (var-get next-market-id))
     (end-block (+ block-height duration))
+    (validated-question question)
+    (validated-description description)
   )
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (> duration u0) err-invalid-amount)
+    (asserts! (> (len validated-question) u0) err-invalid-amount)
+    (asserts! (> (len validated-description) u0) err-invalid-amount)
     (map-set markets { market-id: market-id }
       {
-        question: question,
-        description: description,
+        question: validated-question,
+        description: validated-description,
         end-block: end-block,
         resolved: false,
         outcome: none,
@@ -64,6 +68,8 @@
   (let (
     (position-id (var-get next-position-id))
     (market (unwrap! (map-get? markets { market-id: market-id }) err-not-found))
+    (validated-market-id market-id)
+    (validated-prediction prediction)
   )
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (< block-height (get end-block market)) err-market-closed)
@@ -72,16 +78,16 @@
     (map-set positions { position-id: position-id }
       {
         trader: tx-sender,
-        market-id: market-id,
-        prediction: prediction,
+        market-id: validated-market-id,
+        prediction: validated-prediction,
         amount: amount,
         claimed: false
       }
     )
-    (map-set markets { market-id: market-id }
+    (map-set markets { market-id: validated-market-id }
       (merge market {
-        total-yes: (if prediction (+ (get total-yes market) amount) (get total-yes market)),
-        total-no: (if prediction (get total-no market) (+ (get total-no market) amount))
+        total-yes: (if validated-prediction (+ (get total-yes market) amount) (get total-yes market)),
+        total-no: (if validated-prediction (get total-no market) (+ (get total-no market) amount))
       })
     )
     (var-set next-position-id (+ position-id u1))
@@ -90,12 +96,16 @@
 )
 
 (define-public (resolve-market (market-id uint) (outcome bool))
-  (let ((market (unwrap! (map-get? markets { market-id: market-id }) err-not-found)))
+  (let (
+    (market (unwrap! (map-get? markets { market-id: market-id }) err-not-found))
+    (validated-market-id market-id)
+    (validated-outcome outcome)
+  )
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (>= block-height (get end-block market)) err-market-closed)
     (asserts! (not (get resolved market)) err-already-resolved)
-    (map-set markets { market-id: market-id }
-      (merge market { resolved: true, outcome: (some outcome) })
+    (map-set markets { market-id: validated-market-id }
+      (merge market { resolved: true, outcome: (some validated-outcome) })
     )
     (ok true)
   )
@@ -106,6 +116,7 @@
     (position (unwrap! (map-get? positions { position-id: position-id }) err-not-found))
     (market (unwrap! (map-get? markets { market-id: (get market-id position) }) err-not-found))
     (outcome (unwrap! (get outcome market) err-market-not-resolved))
+    (validated-position-id position-id)
   )
     (asserts! (is-eq tx-sender (get trader position)) err-owner-only)
     (asserts! (get resolved market) err-market-not-resolved)
@@ -121,7 +132,7 @@
     )
       (asserts! (> payout u0) err-insufficient-funds)
       (try! (as-contract (stx-transfer? payout tx-sender (get trader position))))
-      (map-set positions { position-id: position-id }
+      (map-set positions { position-id: validated-position-id }
         (merge position { claimed: true })
       )
       (ok payout)
