@@ -5,6 +5,10 @@
 (define-constant err-market-closed (err u202))
 (define-constant err-already-resolved (err u203))
 (define-constant err-insufficient-funds (err u204))
+(define-constant err-invalid-amount (err u205))
+(define-constant err-market-not-resolved (err u206))
+(define-constant err-already-claimed (err u207))
+(define-constant err-not-winner (err u208))
 
 (define-map markets
   { market-id: uint }
@@ -36,9 +40,10 @@
 (define-public (create-market (question (string-ascii 200)) (description (string-ascii 500)) (duration uint))
   (let (
     (market-id (var-get next-market-id))
-    (end-block (+ stacks-block-height duration))
+    (end-block (+ block-height duration))
   )
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> duration u0) err-invalid-amount)
     (map-set markets { market-id: market-id }
       {
         question: question,
@@ -60,10 +65,10 @@
     (position-id (var-get next-position-id))
     (market (unwrap! (map-get? markets { market-id: market-id }) err-not-found))
   )
-    (asserts! (< stacks-block-height (get end-block market)) err-market-closed)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (< block-height (get end-block market)) err-market-closed)
     (asserts! (not (get resolved market)) err-already-resolved)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-
     (map-set positions { position-id: position-id }
       {
         trader: tx-sender,
@@ -73,14 +78,12 @@
         claimed: false
       }
     )
-
     (map-set markets { market-id: market-id }
       (merge market {
         total-yes: (if prediction (+ (get total-yes market) amount) (get total-yes market)),
         total-no: (if prediction (get total-no market) (+ (get total-no market) amount))
       })
     )
-
     (var-set next-position-id (+ position-id u1))
     (ok position-id)
   )
@@ -89,13 +92,40 @@
 (define-public (resolve-market (market-id uint) (outcome bool))
   (let ((market (unwrap! (map-get? markets { market-id: market-id }) err-not-found)))
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-    (asserts! (>= stacks-block-height (get end-block market)) err-market-closed)
+    (asserts! (>= block-height (get end-block market)) err-market-closed)
     (asserts! (not (get resolved market)) err-already-resolved)
-
     (map-set markets { market-id: market-id }
       (merge market { resolved: true, outcome: (some outcome) })
     )
     (ok true)
+  )
+)
+
+(define-public (claim-winnings (position-id uint))
+  (let (
+    (position (unwrap! (map-get? positions { position-id: position-id }) err-not-found))
+    (market (unwrap! (map-get? markets { market-id: (get market-id position) }) err-not-found))
+    (outcome (unwrap! (get outcome market) err-market-not-resolved))
+  )
+    (asserts! (is-eq tx-sender (get trader position)) err-owner-only)
+    (asserts! (get resolved market) err-market-not-resolved)
+    (asserts! (not (get claimed position)) err-already-claimed)
+    (asserts! (is-eq (get prediction position) outcome) err-not-winner)
+
+    (let (
+      (winning-pool (if outcome (get total-yes market) (get total-no market)))
+      (total-pool (+ (get total-yes market) (get total-no market)))
+      (payout (if (is-eq winning-pool u0) 
+                u0 
+                (/ (* (get amount position) total-pool) winning-pool)))
+    )
+      (asserts! (> payout u0) err-insufficient-funds)
+      (try! (as-contract (stx-transfer? payout tx-sender (get trader position))))
+      (map-set positions { position-id: position-id }
+        (merge position { claimed: true })
+      )
+      (ok payout)
+    )
   )
 )
 
@@ -115,4 +145,33 @@
       total-pool: (+ (get total-yes market) (get total-no market))
     })
   )
+)
+
+(define-read-only (calculate-payout (position-id uint))
+  (let (
+    (position (unwrap! (map-get? positions { position-id: position-id }) err-not-found))
+    (market (unwrap! (map-get? markets { market-id: (get market-id position) }) err-not-found))
+  )
+    (if (get resolved market)
+      (let (
+        (outcome (unwrap! (get outcome market) err-market-not-resolved))
+        (winning-pool (if outcome (get total-yes market) (get total-no market)))
+        (total-pool (+ (get total-yes market) (get total-no market)))
+      )
+        (if (and (is-eq (get prediction position) outcome) (> winning-pool u0))
+          (ok (/ (* (get amount position) total-pool) winning-pool))
+          (ok u0)
+        )
+      )
+      err-market-not-resolved
+    )
+  )
+)
+
+(define-read-only (get-next-market-id)
+  (var-get next-market-id)
+)
+
+(define-read-only (get-next-position-id)
+  (var-get next-position-id)
 )
